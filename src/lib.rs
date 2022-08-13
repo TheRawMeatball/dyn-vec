@@ -284,4 +284,18 @@ impl<'a, VTable: Vtable> BaseDrainReturn<'a, VTable> {
             (vtable, OwningPtr::new(owning))
         }
     }
+
+    pub fn as_dyn_ref(&self) -> &VTable::TraitObj {
+        unsafe {
+            (self.vtable.base().as_trait_obj)(Ptr::new(NonNull::new_unchecked(self.ptr.as_ptr())))
+        }
+    }
+
+    pub fn as_mut_dyn_ref(&mut self) -> &mut VTable::TraitObj {
+        unsafe {
+            (self.vtable.base().as_mut_trait_obj)(PtrMut::new(NonNull::new_unchecked(
+                self.ptr.as_ptr(),
+            )))
+        }
+    }
 }

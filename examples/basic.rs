@@ -13,7 +13,8 @@ fn main() {
     }
     dynvec.drain().for_each(|_| {});
     dynvec.push("lol");
-    for r in dynvec.drain() {
+    for mut r in dynvec.drain() {
+        r.as_mut_dyn_ref();
         r.takes_ownership();
     }
 }

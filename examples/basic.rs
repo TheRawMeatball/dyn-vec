@@ -13,16 +13,16 @@ fn main() {
     }
     dynvec.drain().for_each(|_| {});
     dynvec.push("lol");
-    for mut r in dynvec.drain() {
-        r.as_mut_dyn_ref();
-        r.takes_ownership();
+    for r in dynvec.drain() {
+        r.as_dyn_ref().uses_ref();
+        r.takes_ownership(23);
     }
 }
 
 #[dyn_vec_usable]
 pub trait Example {
     fn uses_ref(&self);
-    fn takes_ownership(self);
+    fn takes_ownership(self, val: u32);
 }
 
 impl<T: Debug> Example for T {
@@ -30,7 +30,7 @@ impl<T: Debug> Example for T {
         dbg!(self);
     }
 
-    fn takes_ownership(self) {
-        dbg!(self);
+    fn takes_ownership(self, val: u32) {
+        dbg!(self, val);
     }
 }

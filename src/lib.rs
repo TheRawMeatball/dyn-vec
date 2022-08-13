@@ -3,8 +3,14 @@
 
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
-const DYN_VEC_ALIGN_POW_COUNT: usize = 3;
-const DYN_VEC_ALIGN_POW_BASE: usize = 8;
+const DYN_VEC_ALIGN_POW_COUNT: usize = 5;
+const DYN_VEC_ALIGN_POW_BASE: usize = 4;
+
+const _: () = {
+    if !DYN_VEC_ALIGN_POW_BASE.is_power_of_two() {
+        panic!("`DYN_VEC_ALIGN_POW_BASE` must be a power of two");
+    }
+};
 
 use bevy_ptr::{OwningPtr, Ptr, PtrMut};
 

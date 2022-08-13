@@ -1,18 +1,14 @@
 #![feature(generic_associated_types)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use std::{alloc::Layout, ptr::NonNull};
+use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
 const DYN_VEC_ALIGN_POW_COUNT: usize = 3;
 const DYN_VEC_ALIGN_POW_BASE: usize = 8;
 
-const _: () = {
-    if DYN_VEC_ALIGN_POW_COUNT > 5 {
-        panic!("There aren't enough variants in VariousAlignedCol");
-    }
-};
-
 use bevy_ptr::{OwningPtr, Ptr, PtrMut};
+
+pub use dyn_vec_macro::dyn_vec_usable;
 
 pub struct DynVec<S: DynVecStorageTrait + ?Sized> {
     cols: [AlignedCol; DYN_VEC_ALIGN_POW_COUNT],
@@ -39,22 +35,29 @@ struct Meta<S: DynVecStorageTrait + ?Sized> {
     offset: usize,
 }
 
-pub trait Vtable: 'static {
-    type TraitObj<'a>;
-    type MutTraitObj<'a>;
-    type DrainReturn<'a>;
+pub trait VtableCompatible<VTable: Vtable> {
+    type TrueType;
+    fn map_ref(t: &Self::TrueType) -> &VTable::TraitObj;
+    fn map_ref_mut(t: &mut Self::TrueType) -> &mut VTable::TraitObj;
+}
 
-    fn as_trait_obj(&self) -> for<'a> unsafe fn(Ptr<'a>) -> Self::TraitObj<'a>;
-    fn as_mut_trait_obj(&self) -> for<'a> unsafe fn(PtrMut<'a>) -> Self::MutTraitObj<'a>;
-    fn pack_drain_return<'a>(&'static self, owning_ptr: OwningPtr<'a>) -> Self::DrainReturn<'a>;
-    fn drop_fn(&self) -> unsafe fn(OwningPtr);
+pub trait Vtable: Sized + 'static {
+    type TraitObj: ?Sized;
+
+    fn base(&'static self) -> &'static BaseVtable<Self>;
+}
+
+pub type DrainReturn<'a, VTable> = <VTable as VtableDrainReturnBinder<'a>>::DrainReturn;
+
+pub trait VtableDrainReturnBinder<'a>: Vtable {
+    type DrainReturn: From<BaseDrainReturn<'a, Self>>;
 }
 
 pub const fn get_index_and_align<T>() -> (usize, usize) {
     let align = std::mem::align_of::<T>();
     let mut index_to_test = 0;
     while index_to_test < DYN_VEC_ALIGN_POW_COUNT {
-        if align < DYN_VEC_ALIGN_POW_BASE.pow((index_to_test + 1) as u32) {
+        if align <= DYN_VEC_ALIGN_POW_BASE.pow((index_to_test + 1) as u32) {
             return (
                 index_to_test,
                 DYN_VEC_ALIGN_POW_BASE.pow((index_to_test + 1) as u32),
@@ -89,13 +92,13 @@ impl<S: DynVecStorageTrait + ?Sized> DynVec<S> {
         OwningPtr::make(val, |ptr| unsafe {
             let offset = correct_col.push(ptr, std::mem::size_of::<T>(), get_align::<T>());
             correct_meta.push(Meta {
-                vtable: <(T,)>::get_vtable(),
+                vtable: <(T,)>::VTABLE,
                 offset,
             });
         });
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = <S::VTable as Vtable>::TraitObj<'_>> {
+    pub fn iter(&self) -> impl Iterator<Item = &<S::VTable as Vtable>::TraitObj> {
         self.metas
             .iter()
             .zip(self.cols.iter())
@@ -107,12 +110,12 @@ impl<S: DynVecStorageTrait + ?Sized> DynVec<S> {
                     let ptr = buf.add(meta.offset);
                     // we know its not null
                     let ptr = Ptr::new(NonNull::new_unchecked(ptr));
-                    (meta.vtable.as_trait_obj())(ptr)
+                    (meta.vtable.base().as_trait_obj)(ptr)
                 })
             })
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = <S::VTable as Vtable>::MutTraitObj<'_>> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut <S::VTable as Vtable>::TraitObj> {
         self.metas
             .iter()
             .zip(self.cols.iter_mut())
@@ -124,35 +127,40 @@ impl<S: DynVecStorageTrait + ?Sized> DynVec<S> {
                     let ptr = buf.add(meta.offset);
                     // we know its not null
                     let ptr = PtrMut::new(NonNull::new_unchecked(ptr));
-                    (meta.vtable.as_mut_trait_obj())(ptr)
+                    (meta.vtable.base().as_mut_trait_obj)(ptr)
                 })
             })
     }
 
-    pub fn drain(&mut self) -> impl Iterator<Item = <S::VTable as Vtable>::DrainReturn<'_>> {
+    pub fn drain(&mut self) -> impl Iterator<Item = DrainReturn<'_, S::VTable>> {
         self.metas
             .iter_mut()
             .zip(self.cols.iter_mut())
             .flat_map(|(metas, col)| unsafe {
                 let buf = col.buf;
+                col.cursor = 0;
                 metas.drain(..).map(move |meta| {
                     // if there's meta s, buffer mustn't be null
                     let buf = buf.unwrap_unchecked().as_ptr();
                     let ptr = buf.add(meta.offset);
                     // we know its not null
                     let ptr = OwningPtr::new(NonNull::new_unchecked(ptr));
-                    meta.vtable.pack_drain_return(ptr)
+                    let base = BaseDrainReturn {
+                        vtable: meta.vtable,
+                        ptr,
+                    };
+                    base.into()
                 })
             })
     }
 }
 
 pub trait DynVecStorageTrait {
-    type VTable: Vtable;
+    type VTable: for<'a> VtableDrainReturnBinder<'a>;
 }
 
 pub trait DynVecStorable<StoredFor: DynVecStorageTrait + ?Sized> {
-    fn get_vtable() -> &'static StoredFor::VTable;
+    const VTABLE: &'static StoredFor::VTable;
 }
 
 #[repr(C)]
@@ -228,5 +236,52 @@ impl AlignedCol {
             self.cursor += align - diff;
         }
         cursor
+    }
+}
+
+pub struct BaseVtable<VTable: Vtable> {
+    as_trait_obj: unsafe fn(Ptr) -> &VTable::TraitObj,
+    as_mut_trait_obj: unsafe fn(PtrMut) -> &mut VTable::TraitObj,
+    drop_fn: unsafe fn(OwningPtr),
+}
+
+pub struct BaseVtableConstructor<VTable, T>(PhantomData<(VTable, T)>);
+impl<VTable, T> BaseVtableConstructor<VTable, T>
+where
+    VTable: Vtable,
+    (T,): VtableCompatible<VTable, TrueType = T> + 'static,
+{
+    pub const VTABLE: BaseVtable<VTable> = BaseVtable {
+        as_trait_obj: |ptr| unsafe { <(T,)>::map_ref(ptr.deref::<T>()) },
+        as_mut_trait_obj: |ptr| unsafe { <(T,)>::map_ref_mut(ptr.deref_mut::<T>()) },
+        drop_fn: |ptr| unsafe { ptr.drop_as::<T>() },
+    };
+}
+
+pub struct BaseDrainReturn<'a, VTable: Vtable> {
+    vtable: &'static VTable,
+    ptr: OwningPtr<'a>,
+}
+
+impl<VTable: Vtable> Drop for BaseDrainReturn<'_, VTable> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        unsafe {
+            let owning = OwningPtr::new(NonNull::new_unchecked(self.ptr.as_ptr()));
+            let vtable = self.vtable;
+            (vtable.base().drop_fn)(owning);
+        }
+    }
+}
+
+impl<'a, VTable: Vtable> BaseDrainReturn<'a, VTable> {
+    // this is necessary because rust doesn't allow any other way to bypass a drop impl while destructuring
+    pub fn destruct(self) -> (&'static VTable, OwningPtr<'a>) {
+        unsafe {
+            let vtable = self.vtable;
+            let owning = NonNull::new_unchecked(self.ptr.as_ptr());
+            std::mem::forget(self);
+            (vtable, OwningPtr::new(owning))
+        }
     }
 }

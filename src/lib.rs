@@ -1,5 +1,8 @@
-#![feature(generic_associated_types)]
+#![cfg_attr(feature = "nightly", feature(inline_const))]
 #![deny(unsafe_op_in_unsafe_fn)]
+
+#[cfg(feature = "nightly")]
+mod nightly;
 
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
@@ -74,13 +77,6 @@ pub const fn get_index_and_align<T>() -> (usize, usize) {
     panic!("This type isn't supported in DynVec");
 }
 
-pub const fn get_index<T>() -> usize {
-    get_index_and_align::<T>().0
-}
-pub const fn get_align<T>() -> usize {
-    get_index_and_align::<T>().1
-}
-
 impl<S: DynVecStorageTrait + ?Sized> DynVec<S> {
     pub fn new() -> Self {
         Self {
@@ -92,11 +88,16 @@ impl<S: DynVecStorageTrait + ?Sized> DynVec<S> {
     where
         (T,): DynVecStorable<S>,
     {
-        let correct_col = &mut self.cols[get_index::<T>()];
-        let correct_meta = &mut self.metas[get_index::<T>()];
+        #[cfg(feature = "nightly")]
+        let (index, align) = nightly::get_index_and_align::<T>();
+        #[cfg(not(feature = "nightly"))]
+        let (index, align) = get_index_and_align::<T>();
+
+        let correct_col = &mut self.cols[index];
+        let correct_meta = &mut self.metas[index];
         // Safe: align is calculated via const fns and size is directly fed
         OwningPtr::make(val, |ptr| unsafe {
-            let offset = correct_col.push(ptr, std::mem::size_of::<T>(), get_align::<T>());
+            let offset = correct_col.push(ptr, std::mem::size_of::<T>(), align);
             correct_meta.push(Meta {
                 vtable: <(T,)>::VTABLE,
                 offset,
